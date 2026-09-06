@@ -1,0 +1,10 @@
+services:
+  nuitka-build:
+    build: .
+    image: nuitka-build:rocky9
+    container_name: nuitka-build
+    restart: unless-stopped
+    command: sleep infinity
+    user: "${JENKINS_UID:-1000}:${JENKINS_GID:-1000}"
+    volumes:
+      - /Users/leventberkkaratas/.jenkins/workspace:/Users/leventberkkaratas/.jenkins/workspace
