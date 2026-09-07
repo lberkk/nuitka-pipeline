@@ -78,6 +78,8 @@ ROOT_MARKERS = ("pyproject.toml", "requirements.txt", "setup.py", ".git")
 
 PEP723_RE = re.compile(r"(?m)^# /// script$\s(?P<content>(^#(| .*)$\s)+)^# ///$")
 
+SYS_PATH_RE = re.compile(r"(?m)^\s*sys\.path\.(?:insert|append)\((.*)$")
+
 
 def run(cmd: list[str], **kwargs) -> None:
     print("$", " ".join(cmd))
@@ -142,10 +144,25 @@ def read_project(entry: Path, root: Path) -> tuple[list[str], str, str | None]:
 
     return [], "none", name
 
+def detect_sys_path(entry: Path) -> list[Path]:
+    found = []
+    for call in SYS_PATH_RE.findall(entry.read_text(encoding="utf-8", errors="replace")):
+        parts = re.findall(r"['\"]([^'\"]+)['\"]", call)
+        if not parts:
+            continue
+        p = entry.parent.joinpath(*parts)
+        if p.is_dir() and p not in found:
+            found.append(p)
+    return found
 
-def scan_imports(root: Path, entry: Path) -> set[str]:
+
+def scan_imports(root: Path, entry: Path, skip: list[Path] = ()) -> set[str]:
     files = {entry}
+    skip = [str(p) for p in skip]
     for dirpath, dirnames, filenames in os.walk(root):
+        if any(dirpath == s or dirpath.startswith(s + os.sep) for s in skip):
+            dirnames[:] = []
+            continue
         dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS and not d.endswith((".dist", ".build"))]
         files.update(Path(dirpath) / f for f in filenames if f.endswith(".py"))
 
@@ -277,6 +294,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--data-file", action="append", help="SRC[=DEST] file or glob")
     p.add_argument("--icon", help=".png embedded into the onefile binary (--linux-icon)")
     p.add_argument("--dry-run", action="store_true", help="print the command, build nothing")
+    p.add_argument("--path", action="append", help="extra directory on PYTHONPATH during the build (relative to root)")
     args = p.parse_args(argv)
     args.nuitka_args = extra
     return args
@@ -290,7 +308,8 @@ def main() -> int:
 
     root = find_root(entry, args.root)
     deps, source, project_name = read_project(entry, root)
-    imports = scan_imports(root, entry)
+    vendored = detect_sys_path(entry)
+    imports = scan_imports(root, entry, vendored)
     name = args.name or (project_name and re.sub(r"[^\w.-]+", "-", project_name)) or entry.stem
 
     print("entry        :", entry)
@@ -299,8 +318,17 @@ def main() -> int:
     print("imports      :", ", ".join(sorted(i for i in imports if i in GUI_IMPORTS or i in PLUGIN_BY_IMPORT)) or "-")
 
     env = dict(os.environ, PYTHONUTF8="1")
+    extra_paths = [Path(p) if os.path.isabs(p) else root / p for p in (args.path or [])]
+    extra_paths += vendored
     if (root / "src").is_dir():
-        env["PYTHONPATH"] = str(root / "src") + os.pathsep + env.get("PYTHONPATH", "")
+        extra_paths.append(root / "src")
+    kept = []
+    for p in extra_paths:
+        if p.is_dir() and str(p) not in kept:
+            kept.append(str(p))
+    if kept:
+        print("pythonpath   :", os.pathsep.join(kept))
+        env["PYTHONPATH"] = os.pathsep.join(kept + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else []))
 
     if args.dry_run:
         python = args.python or sys.executable
