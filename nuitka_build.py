@@ -142,8 +142,13 @@ def check_imports(python: str, imports: set[str], entry: Path, root: Path, env: 
     if missing_pip:
         print("WARNING: packages not found in the build environment:", ", ".join(missing_pip))
         print("         The build may finish, but the binary will fail with ModuleNotFoundError.")
-        print("         Add to EXTRA: "
-            + " ".join("--dep " + n for n in missing_pip))
+        if any((root /f).is_file() for f in ("pyproject.toml", "setup.py", "setup.cfg")):
+            print("         The project declares its own packaging metadata.")
+            print("         Add to EXTRA: --install-project")
+            print("         (installs the exact versions, extras and package metadata; safer than --dep)")
+        else:
+            print("         Add to EXTRA: "
+                  + " ".join("--dep " + n for n in missing_pip))
     for n in missing_os:
         print("WARNING: '%s' is not installed in this Python; it comes from an OS package, not pip." % n)
 
