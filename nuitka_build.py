@@ -35,6 +35,14 @@ def run(cmd: list[str], **kwargs) -> None:
     if subprocess.call(cmd, **kwargs) != 0:
         sys.exit("ERROR: command failed")
 
+def run_soft(cmd: list[str], **kwargs) -> bool:
+    print("$", " ".join(cmd))
+    try:
+        return subprocess.call(cmd, **kwargs) == 0
+    except OSError as exc:
+        print("WARNING: command could not be run:", exc)
+        return False
+
 
 def load_toml(path: Path) -> dict:
         import tomllib
@@ -105,7 +113,6 @@ def scan_imports(root: Path, entry: Path, skip: list[Path] = ()) -> set[str]:
                 names.add(node.module.split(".")[0])
     return names
 
-
 def prepare_env(args, deps: list[str], root: Path) -> str:
     venv = Path(args.output_dir).resolve() / ".venv"
     python = venv / "bin/python"
@@ -118,37 +125,60 @@ def prepare_env(args, deps: list[str], root: Path) -> str:
     return str(python)
 
 
-def check_imports(python: str, imports: set[str], entry: Path, root: Path, env: dict) -> None:
+def check_imports(python: str, imports: set[str], entry: Path, root: Path,
+                  env: dict) -> tuple[list[str], list[str]]:
     names = sorted(imports)
     if not names:
-        return
+        return [], []
     env = dict(env)
     env["PYTHONPATH"] = os.pathsep.join(p for p in (str(entry.parent), env.get("PYTHONPATH", "")) if p)
     try:
         out = subprocess.run([python, "-c", CHECK_SNIPPET] + names, cwd=str(root), env=env,
                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=180)
     except OSError:
-        return
+        return [], []
 
     missing_pip, missing_os = [], []
     for line in out.stdout.split("\n"):
         parts = line.split()
         if len(parts) == 2:
             (missing_os if parts[1] == "1" else missing_pip).append(parts[0])
+    return missing_pip, missing_os
+
+
+def has_metadata(root: Path) -> bool:
+    return any((root / f).is_file() for f in ("pyproject.toml", "setup.py", "setup.cfg"))
+
+
+def install_missing(args, python: str, missing_pip: list[str], root: Path) -> None:
+    pip = [str(python), "-m", "pip", "install", "-q", "--disable-pip-version-check"]
+    if has_metadata(root) and not args.install_project:
+        print("\nInstalling the project itself to satisfy missing imports.")
+        if run_soft(pip + [str(root)]):
+            return
+        print("WARNING: installing the project failed, falling back to individual packages.")
+    print("\nInstalling missing packages:", ", ".join(missing_pip))
+    for n in missing_pip:
+        if not run_soft(pip + [n]):
+            print("WARNING: could not install '%s'; the import name may differ from the "
+                  "package name, use --dep with the real name." % n)
+
+
+def report_missing(missing_pip: list[str], missing_os: list[str], root: Path) -> None:
     if not (missing_pip or missing_os):
         return
-
     print()
     if missing_pip:
         print("WARNING: packages not found in the build environment:", ", ".join(missing_pip))
         print("         The build may finish, but the binary will fail with ModuleNotFoundError.")
-        if any((root /f).is_file() for f in ("pyproject.toml", "setup.py", "setup.cfg")):
+        if has_metadata(root):
             print("         The project declares its own packaging metadata.")
             print("         Add to EXTRA: --install-project")
             print("         (installs the exact versions, extras and package metadata; safer than --dep)")
         else:
             print("         Add to EXTRA: "
                   + " ".join("--dep " + n for n in missing_pip))
+        print("         Or add to EXTRA: --auto-deps (installs them automatically)")
     for n in missing_os:
         print("WARNING: '%s' is not installed in this Python; it comes from an OS package, not pip." % n)
 
@@ -201,6 +231,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--data-file", action="append", help="SRC[=DEST] file or glob")
     p.add_argument("--dry-run", action="store_true", help="print the command, build nothing")
     p.add_argument("--path", action="append", help="extra directory on PYTHONPATH during the build (relative to root)")
+    p.add_argument("--auto-deps", action="store_true",
+                   help="install packages missing from the build venv instead of only warning")
     args = p.parse_args(argv)
     args.nuitka_args = extra
     return args
@@ -239,7 +271,11 @@ def main() -> int:
         python = sys.executable
     else:
         python = prepare_env(args, deps, root)
-        check_imports(python, imports, entry, root, env)
+        missing_pip, missing_os = check_imports(python, imports, entry, root, env)
+        if missing_pip and args.auto_deps:
+            install_missing(args, python, missing_pip, root)
+            missing_pip, missing_os = check_imports(python, imports, entry, root, env)
+        report_missing(missing_pip, missing_os, root)
 
     cmd = build_command(args, entry, root, python, name)
     print("nuitka command:\n   ", " ".join(cmd))
