@@ -1,0 +1,110 @@
+def github = '''
+import com.cloudbees.plugins.credentials.CredentialsProvider
+import org.jenkinsci.plugins.plaincredentials.StringCredentials
+import jenkins.model.Jenkins
+import groovy.json.JsonSlurper
+
+def token = CredentialsProvider.lookupCredentials(
+	StringCredentials, Jenkins.instance, null, null
+).find { it.id == 'github-token' }?.secret?.plainText
+
+def get = { String path ->
+	def conn = new URL('https://api.github.com' + path).openConnection()
+	conn.setRequestProperty('Accept', 'application/vnd.github+json')
+	if (token) conn.setRequestProperty('Authorization', 'Bearer ' + token)
+    conn.connectTimeout = 5000
+    conn.readTimeout = 20000
+    conn.responseCode == 200 ? new JsonSlurper().parseText(conn.inputStream.text) : null
+}
+'''
+
+def REPOS = github + '''
+def repos = []
+def page = 1
+while (page <= 5) {
+    def batch = get('/user/starred?per_page=100&page=' + page)
+    if (!batch) break
+    repos += batch.collect { it.full_name }
+    if (batch.size() < 100) break
+    page++
+}
+return repos.sort() ?: ['ERROR: could not list starred repositories']
+'''
+
+def BRANCHES = github + '''
+if (!REPO || REPO.startsWith('ERROR')) return []
+def head = get('/repos/' + REPO)?.default_branch
+def names = get('/repos/' + REPO + '/branches?per_page=100')?.collect { it.name } ?: []
+if (head && names.remove(head)) names.add(0, head)
+return names ?: ['main']
+'''
+
+def ENTRIES = github + '''
+if (!REPO || !BRANCH || REPO.startsWith('ERROR')) return []
+def tree = get('/repos/' + REPO + '/git/trees/' + BRANCH + '?recursive=1')
+if (!tree) return ['ERROR: could not list files']
+
+def files = tree.tree
+        .findAll { it.type == 'blob' && it.path.endsWith('.py') }
+        .collect { it.path }
+
+if (tree.truncated) files << 'WARNING: tree truncated, some files may be missing'
+return files
+'''
+
+def SELECTOR = '''
+pipeline {
+    agent any
+    stages {
+        stage('Trigger') {
+            steps {
+                build job: 'python-build',
+                      wait: false,
+                      parameters: [
+                          string(name: 'REPO',   value: params.REPO),
+                          string(name: 'BRANCH', value: params.BRANCH),
+                          string(name: 'ENTRY',  value: params.ENTRY),
+                          string(name: 'EXTRA',  value: params.EXTRA)
+                      ]
+                echo "Triggered nuitka-build: ${params.REPO} @ ${params.BRANCH} -> ${params.ENTRY}"
+            }
+        }
+    }
+}
+'''
+
+pipelineJob('python-select') {
+    parameters {
+        activeChoiceParam('REPO') {
+            choiceType('SINGLE_SELECT')
+            groovyScript {
+                script(REPOS)
+                fallbackScript('return ["ERROR: could not list repositories"]')
+            }
+        }
+        activeChoiceReactiveParam('BRANCH') {
+            choiceType('SINGLE_SELECT')
+            referencedParameter('REPO')
+            groovyScript {
+                script(BRANCHES)
+                fallbackScript('return ["main"]')
+            }
+        }
+        activeChoiceReactiveParam('ENTRY') {
+            choiceType('SINGLE_SELECT')
+            referencedParameter('REPO')
+            referencedParameter('BRANCH')
+            groovyScript {
+                script(ENTRIES)
+                fallbackScript('return []')
+            }
+        }
+        stringParam('EXTRA', '', 'Extra arguments, for example: --mode=onefile')
+    }
+    definition {
+        cps {
+            script(SELECTOR)
+            sandbox(true)
+        }
+    }
+}
