@@ -109,7 +109,7 @@ pipeline {
                           string(name: 'REPO',   value: params.REPO),
                           string(name: 'BRANCH', value: params.BRANCH),
                           string(name: 'ENTRY',  value: params.ENTRY),
-						  string(name: 'DATA', value: params.DATA),
+						  string(name: 'DATA', value: params.DATA ?: ''),
                           string(name: 'EXTRA',  value: params.EXTRA)
                       ]
                 echo "Triggered nuitka-build: ${params.REPO} @ ${params.BRANCH} -> ${params.ENTRY}"
