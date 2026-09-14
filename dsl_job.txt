@@ -81,10 +81,14 @@ if (!REPO || !BRANCH || REPO.startsWith('ERROR')) return []
 def tree = get('/repos/' + REPO + '/git/trees/' + BRANCH + '?recursive=1')
 if (!tree) return ['ERROR: could not list files']
 
-def folders = tree.tree
-    .findAll { it.type == 'tree' && it.path }
+def skip = ['.git', '.github', '.venv', 'venv', '__pycache__', 'build', 'dist',
+            'node_modules', '.tox', 'tests', 'test', 'docs']
+
+return tree.tree
+    .findAll { it.type == 'tree' }
     .collect { it.path }
-return folders
+    .findAll { d -> !d.tokenize('/').any { skip.contains(it) } }
+    .sort()
 ''')
                 fallbackScript('return []')
             }
@@ -95,7 +99,7 @@ return folders
         cps {
             script('''
 pipeline {
-    { label 'rocky-node' }
+    agent { label 'rocky-node' }
     stages {
         stage('Trigger') {
             steps {
