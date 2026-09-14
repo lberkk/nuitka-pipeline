@@ -18,7 +18,12 @@ def get = { String path ->
 }
 '''
 
-def REPOS = github + '''
+pipelineJob('python-select') {
+    parameters {
+        activeChoiceParam('REPO') {
+            choiceType('SINGLE_SELECT')
+            groovyScript {
+                script(github + '''
 def repos = []
 def page = 1
 while (page <= 5) {
@@ -28,57 +33,8 @@ while (page <= 5) {
     if (batch.size() < 100) break
     page++
 }
-return repos.sort() ?: ['ERROR: could not list starred repositories']
-'''
-
-def BRANCHES = github + '''
-if (!REPO || REPO.startsWith('ERROR')) return []
-def head = get('/repos/' + REPO)?.default_branch
-def names = get('/repos/' + REPO + '/branches?per_page=100')?.collect { it.name } ?: []
-if (head && names.remove(head)) names.add(0, head)
-return names ?: ['main']
-'''
-
-def ENTRIES = github + '''
-if (!REPO || !BRANCH || REPO.startsWith('ERROR')) return []
-def tree = get('/repos/' + REPO + '/git/trees/' + BRANCH + '?recursive=1')
-if (!tree) return ['ERROR: could not list files']
-
-def files = tree.tree
-        .findAll { it.type == 'blob' && it.path.endsWith('.py') }
-        .collect { it.path }
-
-if (tree.truncated) files << 'WARNING: tree truncated, some files may be missing'
-return files
-'''
-
-def SELECTOR = '''
-pipeline {
-    agent any
-    stages {
-        stage('Trigger') {
-            steps {
-                build job: 'python-build',
-                      wait: false,
-                      parameters: [
-                          string(name: 'REPO',   value: params.REPO),
-                          string(name: 'BRANCH', value: params.BRANCH),
-                          string(name: 'ENTRY',  value: params.ENTRY),
-                          string(name: 'EXTRA',  value: params.EXTRA)
-                      ]
-                echo "Triggered nuitka-build: ${params.REPO} @ ${params.BRANCH} -> ${params.ENTRY}"
-            }
-        }
-    }
-}
-'''
-
-pipelineJob('python-select') {
-    parameters {
-        activeChoiceParam('REPO') {
-            choiceType('SINGLE_SELECT')
-            groovyScript {
-                script(REPOS)
+return repos ?: ['ERROR: could not list starred repositories']
+''')
                 fallbackScript('return ["ERROR: could not list repositories"]')
             }
         }
@@ -86,7 +42,13 @@ pipelineJob('python-select') {
             choiceType('SINGLE_SELECT')
             referencedParameter('REPO')
             groovyScript {
-                script(BRANCHES)
+                script(github + '''
+if (!REPO || REPO.startsWith('ERROR')) return []
+def head = get('/repos/' + REPO)?.default_branch
+def names = get('/repos/' + REPO + '/branches?per_page=100')?.collect { it.name } ?: []
+if (head && names.remove(head)) names.add(0, head)
+return names ?: ['main']
+''')
                 fallbackScript('return ["main"]')
             }
         }
@@ -95,15 +57,63 @@ pipelineJob('python-select') {
             referencedParameter('REPO')
             referencedParameter('BRANCH')
             groovyScript {
-                script(ENTRIES)
+                script(github + '''
+if (!REPO || !BRANCH || REPO.startsWith('ERROR')) return []
+def tree = get('/repos/' + REPO + '/git/trees/' + BRANCH + '?recursive=1')
+if (!tree) return ['ERROR: could not list files']
+
+def files = tree.tree
+        .findAll { it.type == 'blob' && it.path.endsWith('.py') }
+        .collect { it.path }
+return files
+''')
                 fallbackScript('return []')
             }
         }
-        stringParam('EXTRA', '', 'Extra arguments, for example: --mode=onefile')
+      
+      activeChoiceReactiveParam('DATA') {
+            choiceType('CHECKBOX')
+            referencedParameter('REPO')
+            referencedParameter('BRANCH')
+            groovyScript {
+                script(github + '''
+if (!REPO || !BRANCH || REPO.startsWith('ERROR')) return []
+def tree = get('/repos/' + REPO + '/git/trees/' + BRANCH + '?recursive=1')
+if (!tree) return ['ERROR: could not list files']
+
+def folders = tree.tree
+    .findAll { it.type == 'tree' && it.path }
+    .collect { it.path }
+return folders
+''')
+                fallbackScript('return []')
+            }
+        }
+        stringParam('EXTRA', '')
     }
     definition {
         cps {
-            script(SELECTOR)
+            script('''
+pipeline {
+    { label 'rocky-node' }
+    stages {
+        stage('Trigger') {
+            steps {
+                build job: 'python_native_build',
+                      wait: false,
+                      parameters: [
+                          string(name: 'REPO',   value: params.REPO),
+                          string(name: 'BRANCH', value: params.BRANCH),
+                          string(name: 'ENTRY',  value: params.ENTRY),
+						  string(name: 'DATA', value: params.DATA),
+                          string(name: 'EXTRA',  value: params.EXTRA)
+                      ]
+                echo "Triggered nuitka-build: ${params.REPO} @ ${params.BRANCH} -> ${params.ENTRY}"
+            }
+        }
+    }
+}
+''')
             sandbox(true)
         }
     }
