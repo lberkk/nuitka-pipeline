@@ -18,7 +18,7 @@ def get = { String path ->
 }
 '''
 
-pipelineJob('python-select') {
+pipelineJob('python-native-build') {
     parameters {
         activeChoiceParam('REPO') {
             choiceType('SINGLE_SELECT')
@@ -72,7 +72,7 @@ return files
         }
       
       activeChoiceReactiveParam('DATA') {
-            choiceType('CHECKBOX')
+            choiceType('MULTI_SELECT')
             referencedParameter('REPO')
             referencedParameter('BRANCH')
             groovyScript {
@@ -93,27 +93,54 @@ return tree.tree
                 fallbackScript('return []')
             }
         }
-        stringParam('EXTRA', '')
     }
-    definition {
+  
+        definition {
         cps {
             script('''
 pipeline {
     agent { label 'rocky-node' }
+
     stages {
-        stage('Trigger') {
+        stage('Build Image') {
             steps {
-                build job: 'python_native_build',
-                      wait: false,
-                      parameters: [
-                          string(name: 'REPO',   value: params.REPO),
-                          string(name: 'BRANCH', value: params.BRANCH),
-                          string(name: 'ENTRY',  value: params.ENTRY),
-						  string(name: 'DATA', value: params.DATA ?: ''),
-                          string(name: 'EXTRA',  value: params.EXTRA)
-                      ]
-                echo "Triggered nuitka-build: ${params.REPO} @ ${params.BRANCH} -> ${params.ENTRY}"
+                sh 'rm -rf build src pipeline'
+                sh 'git clone --depth 1 https://github.com/lberkk/nuitka-pipeline.git pipeline'
+                sh 'docker build -t "nuitka-build:${BUILD_NUMBER}" pipeline'
             }
+        }
+
+        stage('Fetch') {
+            steps {
+                withCredentials([string(credentialsId: 'github-token', variable: 'GH_TOKEN')]) {
+                    sh 'git clone --branch "$BRANCH" "https://x-access-token:$GH_TOKEN@github.com/$REPO.git" src'
+                    sh 'git -C src remote set-url origin "https://github.com/$REPO.git"'
+                }
+            }
+        }
+
+        stage('Build') {
+            steps {
+                sh \'\'\'
+                    ARGS=""
+                    IFS=','
+                    for d in $DATA; do
+                        [ -n "$d" ] && ARGS="$ARGS --data-dir $d"
+                    done
+                    unset IFS
+
+                    docker run --rm --user "$(id -u):$(id -g)" \\
+                      -e HOME=/tmp \\
+                      -v "$WORKSPACE:$WORKSPACE" -w "$WORKSPACE" "nuitka-build:${BUILD_NUMBER}" \\
+                      python3.11 /opt/nuitka/nuitka_build.py "src/$ENTRY" --auto-deps $ARGS
+                \'\'\'
+            }
+        }
+    }
+
+    post {
+        success {
+            archiveArtifacts artifacts: 'build/*'
         }
     }
 }
