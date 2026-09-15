@@ -104,9 +104,8 @@ pipeline {
     stages {
         stage('Build Image') {
             steps {
-                sh 'rm -rf build src pipeline'
-                sh 'git clone --depth 1 https://github.com/lberkk/nuitka-pipeline.git pipeline'
-                sh 'docker build -t "nuitka-build:${BUILD_NUMBER}" pipeline'
+                sh 'rm -rf build src'
+                sh 'docker build -t nuitka-build:latest "$WORKSPACE"'
             }
         }
 
@@ -129,9 +128,9 @@ pipeline {
                     done
                     unset IFS
 
-                    docker run --rm --user "$(id -u):$(id -g)" \\
-                      -e HOME=/tmp \\
-                      -v "$WORKSPACE:$WORKSPACE" -w "$WORKSPACE" "nuitka-build:${BUILD_NUMBER}" \\
+                    docker run --rm --name "nuitka-build-$BUILD_NUMBER" \\
+                      --user "$(id -u):$(id -g)" -e HOME=/tmp \\
+                      -v "$WORKSPACE:$WORKSPACE" -w "$WORKSPACE" nuitka-build:latest \\
                       python3.11 /opt/nuitka/nuitka_build.py "src/$ENTRY" --auto-deps $ARGS
                 \'\'\'
             }
